@@ -3,6 +3,7 @@ from __future__ import division
 from __future__ import print_function
 
 from collections import deque
+import gc
 import time
 
 import ray
@@ -32,7 +33,7 @@ class Queue(object):
 
     def size(self):
         """The size of the queue."""
-        return ray.get(self.actor.qsize.remote())
+        return _release(self.actor.qsize.remote())
 
     def qsize(self):
         """The size of the queue."""
@@ -40,11 +41,11 @@ class Queue(object):
 
     def empty(self):
         """Whether the queue is empty."""
-        return ray.get(self.actor.qsize.remote())
+        return _release(self.actor.qsize.remote())
 
     def full(self):
         """Whether the queue is full."""
-        return ray.get(self.actor.full.remote())
+        return _release(self.actor.full.remote())
 
     def put(self, item, block=True, timeout=None):
         """Adds an item to the queue.
@@ -58,12 +59,12 @@ class Queue(object):
         if self.maxsize <= 0:
             self.actor.put.remote(item)
         elif not block:
-            if not ray.get(self.actor.put.remote(item)):
+            if not _release(self.actor.put.remote(item)):
                 raise Full
         elif timeout is None:
             # Polling
             # Use a not_full condition variable or promise?
-            while not ray.get(self.actor.put.remote(item)):
+            while not _release(self.actor.put.remote(item)):
                 # Consider adding time.sleep here
                 pass
         elif timeout < 0:
@@ -74,7 +75,7 @@ class Queue(object):
             # Use a condition variable or switch to promise?
             success = False
             while not success and time.time() < endtime:
-                success = ray.get(self.actor.put.remote(item))
+                success = _release(self.actor.put.remote(item))
             if not success:
                 raise Full
 
@@ -91,16 +92,16 @@ class Queue(object):
             Empty if the queue is empty and blocking is False.
         """
         if not block:
-            success, item = ray.get(self.actor.get.remote())
+            success, item = _release(self.actor.get.remote())
             if not success:
                 raise Empty
         elif timeout is None:
             # Polling
             # Use a not_empty condition variable or return a promise?
-            success, item = ray.get(self.actor.get.remote())
+            success, item = _release(self.actor.get.remote())
             while not success:
                 # Consider adding time.sleep here
-                success, item = ray.get(self.actor.get.remote())
+                success, item = _release(self.actor.get.remote())
         elif timeout < 0:
             raise ValueError("'timeout' must be a non-negative number")
         else:
@@ -109,7 +110,7 @@ class Queue(object):
             # Use a not_full condition variable or return a promise?
             success = False
             while not success and time.time() < endtime:
-                success, item = ray.get(self.actor.get.remote())
+                success, item = _release(self.actor.get.remote())
             if not success:
                 raise Empty
         return item
@@ -169,3 +170,12 @@ class _QueueActor(object):
 
     def _get(self):
         return self.queue.popleft()
+
+
+def _release(obj_id):
+    """ Fetch object then explicitly free it from the object store
+    """
+    obj = ray.get(obj_id)
+    ray.internal.free(obj_id)
+    gc.collect()
+    return obj
